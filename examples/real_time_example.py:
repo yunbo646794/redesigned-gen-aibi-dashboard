@@ -1,0 +1,55 @@
+"""
+Real-Time Processing Example
+~~~~~~~~~~~~~~~~~~~~~~~~
+Demonstrates the improvement from 5-day lag to real-time processing.
+"""
+
+from genai_dashboard.core.real_time_processor import RealTimeProcessor
+from genai_dashboard.aws.kinesis_manager import KinesisManager
+import time
+from datetime import datetime
+
+def demonstrate_real_time_processing():
+    """
+    Demonstrate real-time processing capabilities.
+    Shows improvement from 5-day lag to near real-time.
+    """
+    # Initialize components
+    processor = RealTimeProcessor()
+    kinesis = KinesisManager('sales-stream')
+
+    # Process sample sale
+    sample_sale = {
+        'sale_id': '12345',
+        'timestamp': datetime.now().isoformat(),
+        'amount': 1000.00,
+        'customer_id': 'CUST001'
+    }
+
+    # Show processing time
+    start_time = time.time()
+    
+    # Put record in stream
+    sequence_number = kinesis.put_sales_record(sample_sale)
+    
+    # Process the record
+    processed_data = processor.process_real_time_data('sales-stream')
+    
+    end_time = time.time()
+    processing_time = end_time - start_time
+
+    print(f"""
+    Real-Time Processing Demonstration
+    --------------------------------
+    Previous System Lag: 5 days
+    Current System Lag: {processing_time:.2f} seconds
+    Improvement: {(5*24*3600 - processing_time)/(5*24*3600)*100:.2f}%
+    
+    Metrics:
+    - Records Processed: {len(processed_data)}
+    - Processing Time: {processing_time:.2f} seconds
+    - Sequence Number: {sequence_number}
+    """)
+
+if __name__ == "__main__":
+    demonstrate_real_time_processing()

@@ -1,233 +1,93 @@
 """
-Real-Time Sales Forecasting Example
+Real-Time Sales Forecasting System
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Demonstrates elimination of 5-day lag using advanced time-series forecasting.
-Uses ensemble of models: Prophet, LSTM, and XGBoost for robust predictions.
+Demonstrates elimination of reporting lag using an ensemble of models
+(Prophet, LSTM, and XGBoost) for robust, production-grade predictions.
+
+Author: Yunbo Cheng
+Date: 2025
 """
 
 import pandas as pd
 import numpy as np
+from typing import Dict, Tuple
 from datetime import datetime, timedelta
+import logging
+
+# Forecasting Models
 from prophet import Prophet
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_absolute_percentage_error
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.callbacks import EarlyStopping
 import xgboost as xgb
-from sklearn.metrics import mean_absolute_percentage_error
-import logging
-from typing import Dict, List, Tuple
+
+# Visualization
+import matplotlib.pyplot as plt
+
 
 class SalesForecaster:
+    """
+    Real-time sales forecasting engine using ensemble models:
+    - Prophet (time series with seasonality)
+    - LSTM (deep learning sequence model)
+    - XGBoost (tree-based regression on features)
+    """
+
     def __init__(self, config: Dict = None):
         """
-        Initialize sales forecaster with multiple models.
-        
+        Initialize sales forecaster with configurable parameters.
+
         Args:
-            config: Configuration dictionary for models and parameters
+            config (dict): Custom model configurations (optional).
         """
         self.config = config or {
-            'prophet_params': {
-                'changepoint_prior_scale': 0.05,
-                'seasonality_prior_scale': 10,
-                'seasonality_mode': 'multiplicative'
+            "prophet_params": {
+                "changepoint_prior_scale": 0.05,
+                "seasonality_prior_scale": 10,
+                "seasonality_mode": "multiplicative",
             },
-            'lstm_params': {
-                'units': 50,
-                'dropout': 0.2,
-                'epochs': 100,
-                'batch_size': 32
+            "lstm_params": {
+                "units": 50,
+                "dropout": 0.2,
+                "epochs": 100,
+                "batch_size": 32,
             },
-            'xgb_params': {
-                'max_depth': 7,
-                'eta': 0.1,
-                'objective': 'reg:squarederror'
-            }
+            "xgb_params": {
+                "max_depth": 7,
+                "eta": 0.1,
+                "objective": "reg:squarederror",
+                "n_estimators": 200,
+            },
+            "ensemble_weights": {"prophet": 0.4, "lstm": 0.3, "xgb": 0.3},
         }
-        
+
         self.logger = logging.getLogger(__name__)
         self.scaler = MinMaxScaler()
         self._initialize_models()
 
-    def _initialize_models(self):
-        """Initialize all forecasting models."""
-        # Prophet Model
-        self.prophet_model = Prophet(**self.config['prophet_params'])
-        
-        # LSTM Model
-        self.lstm_model = Sequential([
-            LSTM(units=self.config['lstm_params']['units'], 
-                 return_sequences=True, 
-                 input_shape=(5, 1)),
-            Dropout(self.config['lstm_params']['dropout']),
-            LSTM(units=self.config['lstm_params']['units']//2),
-            Dropout(self.config['lstm_params']['dropout']),
-            Dense(1)
-        ])
-        self.lstm_model.compile(optimizer='adam', loss='mse')
-        
-        # XGBoost Model
-        self.xgb_model = xgb.XGBRegressor(**self.config['xgb_params'])
+    def _initialize_models(self) -> None:
+        """Initialize Prophet, LSTM, and XGBoost models."""
+        self.prophet_model = Prophet(**self.config["prophet_params"])
 
-    def prepare_data(self, data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """
-        Prepare data for all models.
-        
-        Args:
-            data: Historical sales data
-            
-        Returns:
-            Tuple of processed dataframes for different models
-        """
-        # Ensure datetime index
-        data['date'] = pd.to_datetime(data['date'])
-        data = data.set_index('date').sort_index()
-        
-        # Create features
-        data['day_of_week'] = data.index.dayofweek
-        data['month'] = data.index.month
-        data['year'] = data.index.year
-        data['day_of_year'] = data.index.dayofyear
-        
-        # Create lagged features
-        for i in range(1, 6):
-            data[f'sales_lag_{i}'] = data['sales'].shift(i)
-            
-        # Create rolling features
-        data['rolling_mean_7d'] = data['sales'].rolling(window=7).mean()
-        data['rolling_std_7d'] = data['sales'].rolling(window=7).std()
-        
-        # Handle missing values
-        data = data.fillna(method='bfill')
-        
-        return data
-
-    def train_models(self, data: pd.DataFrame):
-        """Train all models with historical data."""
-        try:
-            # Prepare data for each model
-            prophet_data = data.reset_index()[['date', 'sales']].rename(
-                columns={'date': 'ds', 'sales': 'y'}
-            )
-            
-            lstm_data = self.scaler.fit_transform(data[['sales']])
-            lstm_X, lstm_y = self._create_sequences(lstm_data)
-            
-            xgb_features = ['day_of_week', 'month', 'year', 'day_of_year',
-                           'rolling_mean_7d', 'rolling_std_7d'] + \
-                          [f'sales_lag_{i}' for i in range(1, 6)]
-            
-            # Train Prophet
-            self.prophet_model.fit(prophet_data)
-            
-            # Train LSTM
-            self.lstm_model.fit(
-                lstm_X, lstm_y,
-                epochs=self.config['lstm_params']['epochs'],
-                batch_size=self.config['lstm_params']['batch_size'],
-                verbose=0
-            )
-            
-            # Train XGBoost
-            self.xgb_model.fit(data[xgb_features], data['sales'])
-            
-            self.logger.info("All models trained successfully")
-            
-        except Exception as e:
-            self.logger.error(f"Model training failed: {str(e)}")
-            raise
-
-    def forecast_missing_days(self, 
-                            current_data: pd.DataFrame,
-                            days_to_forecast: int = 5) -> pd.DataFrame:
-        """
-        Forecast missing days (t-5 to t-0) using ensemble approach.
-        
-        Args:
-            current_data: Most recent data
-            days_to_forecast: Number of days to forecast
-            
-        Returns:
-            DataFrame with forecasted values
-        """
-        try:
-            # Generate forecasts from each model
-            prophet_forecast = self._prophet_forecast(current_data, days_to_forecast)
-            lstm_forecast = self._lstm_forecast(current_data, days_to_forecast)
-            xgb_forecast = self._xgb_forecast(current_data, days_to_forecast)
-            
-            # Combine forecasts (weighted average)
-            weights = {'prophet': 0.4, 'lstm': 0.3, 'xgb': 0.3}
-            
-            final_forecast = pd.DataFrame({
-                'date': prophet_forecast.index,
-                'prophet_forecast': prophet_forecast.values,
-                'lstm_forecast': lstm_forecast.values,
-                'xgb_forecast': xgb_forecast.values
-            })
-            
-            final_forecast['ensemble_forecast'] = (
-                weights['prophet'] * final_forecast['prophet_forecast'] +
-                weights['lstm'] * final_forecast['lstm_forecast'] +
-                weights['xgb'] * final_forecast['xgb_forecast']
-            )
-            
-            return final_forecast
-            
-        except Exception as e:
-            self.logger.error(f"Forecasting failed: {str(e)}")
-            raise
-
-    def _create_sequences(self, data: np.ndarray, 
-                         seq_length: int = 5) -> Tuple[np.ndarray, np.ndarray]:
-        """Create sequences for LSTM model."""
-        X, y = [], []
-        for i in range(len(data) - seq_length):
-            X.append(data[i:(i + seq_length)])
-            y.append(data[i + seq_length])
-        return np.array(X), np.array(y)
-
-    def evaluate_forecast(self, 
-                         actual: pd.Series, 
-                         forecast: pd.Series) -> Dict[str, float]:
-        """Calculate forecast accuracy metrics."""
-        return {
-            'mape': mean_absolute_percentage_error(actual, forecast),
-            'rmse': np.sqrt(np.mean((actual - forecast) ** 2)),
-            'mae': np.mean(np.abs(actual - forecast))
-        }
-
-def demonstrate_real_time_processing():
-    """Demonstrate real-time processing with advanced forecasting."""
-    # Load historical data
-    historical_data = pd.read_csv('sales_data.csv')
-    
-    # Initialize forecaster
-    forecaster = SalesForecaster()
-    
-    # Prepare data
-    processed_data = forecaster.prepare_data(historical_data)
-    
-    # Train models
-    forecaster.train_models(processed_data)
-    
-    # Generate forecasts for missing days
-    forecasts = forecaster.forecast_missing_days(processed_data)
-    
-    # Print results
-    print("\nReal-Time Sales Forecasting Results")
-    print("-----------------------------------")
-    print(f"Forecast for missing days (t-5 to t-0):")
-    print(forecasts[['date', 'ensemble_forecast']].to_string(index=False))
-    
-    if 'actual_sales' in forecasts.columns:
-        metrics = forecaster.evaluate_forecast(
-            forecasts['actual_sales'],
-            forecasts['ensemble_forecast']
+        self.lstm_model = Sequential(
+            [
+                LSTM(
+                    units=self.config["lstm_params"]["units"],
+                    return_sequences=True,
+                    input_shape=(5, 1),
+                ),
+                Dropout(self.config["lstm_params"]["dropout"]),
+                LSTM(units=self.config["lstm_params"]["units"] // 2),
+                Dropout(self.config["lstm_params"]["dropout"]),
+                Dense(1),
+            ]
         )
-        print("\nForecast Accuracy Metrics:")
-        for metric, value in metrics.items():
-            print(f"{metric.upper()}: {value:.4f}")
+        self.lstm_model.compile(optimizer="adam", loss="mse")
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    demonstrate_real_time_processing()
+        self.xgb_model = xgb.XGBRegressor(**self.config["xgb_params"])
+
+    def prepare_data(self, data: pd.DataFrame) -> pd.DataFrame:
+        """
+        Prepare historical sales data with features and lags.
